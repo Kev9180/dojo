@@ -16,17 +16,13 @@ BELT_REQUIREMENTS = {
     "blue": "software-exploitation",
 }
 
-def belt_asset(color):
-    belt = color + ".svg" if color in BELT_ORDER else "white.svg"
-    return url_for("views.themes", path=f"img/dojo/{belt}")
-
 def get_user_emojis(user):
     emojis = [ ]
     for dojo in Dojos.query.all():
         emoji = dojo.award and dojo.award.get('emoji', None)
         if not emoji:
             continue
-        if dojo.completed(user):
+        if dojo.challenges and dojo.completed(user):
             emojis.append((emoji, dojo.name, dojo.hex_dojo_id))
     return emojis
 

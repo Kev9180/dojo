@@ -8,6 +8,7 @@ import time
 import docker
 import docker.errors
 import docker.types
+import redis
 from flask import abort, request, current_app
 from flask_restx import Namespace, Resource
 from CTFd.cache import cache
@@ -50,15 +51,13 @@ def remove_container(user):
             container = docker_client.containers.get(container_name(user))
             container.remove(force=True)
             container.wait(condition="removed")
-        except docker.errors.NotFound:
+        except (docker.errors.NotFound, docker.errors.APIError):
             pass
-        try:
-            overlay_volume = docker_client.volumes.get(f"{user.id}-overlay")
-            overlay_volume.remove()
-        except docker.errors.NotFound:
-            pass
-
-
+        for volume in [f"{user.id}", f"{user.id}-overlay"]:
+            try:
+                docker_client.volumes.get(volume).remove()
+            except (docker.errors.NotFound, docker.errors.APIError):
+                pass
 
 def start_container(docker_client, user, as_user, user_mounts, dojo_challenge, practice):
     hostname = "~".join(
@@ -178,6 +177,10 @@ def start_container(docker_client, user, as_user, user_mounts, dojo_challenge, p
         default_network.disconnect(container)
 
     container.start()
+    for message in container.attach(stream=True):
+        if message == b"Initialized.\n":
+            break
+
     cache.set(f"user_{user.id}-running-image", dojo_challenge.image, timeout=0)
     return container
 
@@ -218,9 +221,14 @@ def insert_challenge(container, as_user, dojo_challenge):
 
 def insert_flag(container, flag):
     flag = f"pwn.college{{{flag}}}"
-    socket = container.attach_socket(params=dict(stdin=1, stream=1))
-    socket._sock.sendall(flag.encode() + b"\n")
-    socket.close()
+    if "localhost" in container.client.api.base_url:
+        socket = container.attach_socket(params=dict(stdin=1, stream=1))
+        socket._sock.sendall(flag.encode() + b"\n")
+        socket.close()
+    else:
+        ws = container.attach_socket(params=dict(stdin=1, stream=1), ws=True)
+        ws.send_text(f"{flag}\n")
+        ws.close()
 
 
 def start_challenge(user, dojo_challenge, practice, *, as_user=None):
@@ -234,6 +242,7 @@ def start_challenge(user, dojo_challenge, practice, *, as_user=None):
                 "/home/hacker",
                 str(user.id),
                 "volume",
+                no_copy=True,
                 driver_config=docker.types.DriverConfig("homefs"),
             )
         )
@@ -243,12 +252,14 @@ def start_challenge(user, dojo_challenge, practice, *, as_user=None):
                 "/home/hacker",
                 f"{user.id}-overlay",
                 "volume",
+                no_copy=True,
                 driver_config=docker.types.DriverConfig("homefs", options=dict(overlay=str(as_user.id))),
             ),
             docker.types.Mount(
                 "/home/me",
                 str(user.id),
                 "volume",
+                no_copy=True,
                 driver_config=docker.types.DriverConfig("homefs"),
             ),
         ])
@@ -275,9 +286,22 @@ def start_challenge(user, dojo_challenge, practice, *, as_user=None):
     insert_flag(container, flag)
 
 
+def docker_locked(func):
+    def wrapper(*args, **kwargs):
+        user = get_current_user()
+        redis_client = redis.from_url(current_app.config["REDIS_URL"])
+        try:
+            with redis_client.lock(f"user.{user.id}.docker.lock", blocking_timeout=0, timeout=60):
+                return func(*args, **kwargs)
+        except redis.exceptions.LockError:
+            return {"success": False, "error": "Already starting a challenge"}
+    return wrapper
+
+
 @docker_namespace.route("")
 class RunDocker(Resource):
     @authed_only
+    @docker_locked
     def post(self):
         data = request.get_json()
         dojo_id = data.get("dojo")
@@ -339,14 +363,21 @@ class RunDocker(Resource):
                     return {"success": False, "error": f"Not an official student in this dojo ({as_user_id})"}
                 as_user = student.user
 
-        try:
-            start_challenge(user, dojo_challenge, practice, as_user=as_user)
-        except RuntimeError as e:
-            logger.exception(f"ERROR: Docker failed for {user.id}:")
-            return {"success": False, "error": str(e)}
-        except Exception as e:
-            logger.exception(f"ERROR: Docker failed for {user.id}:")
+        max_attempts = 3
+        for attempt in range(1, max_attempts+1):
+            try:
+                logger.info(f"Starting challenge for user {user.id} (attempt {attempt}/{max_attempts})...")
+                start_challenge(user, dojo_challenge, practice, as_user=as_user)
+                break
+            except Exception as e:
+                logger.exception(f"Attempt {attempt} failed for user {user.id} with error: {e}")
+                if attempt < max_attempts:
+                    logger.info(f"Retrying... ({attempt}/{max_attempts})")
+                    time.sleep(2)
+        else:
+            logger.error(f"ERROR: Docker failed for {user.id} after {max_attempts} attempts.")
             return {"success": False, "error": "Docker failed"}
+
         return {"success": True}
 
     @authed_only

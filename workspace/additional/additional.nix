@@ -2,7 +2,6 @@
 
 let
   pythonEnv = pkgs.python3.withPackages (ps: with ps; [
-    angr
     asteval
     flask
     ipython
@@ -10,6 +9,7 @@ let
     psutil
     pwntools
     pycryptodome
+    pyroute2
     r2pipe
     requests
     ropper
@@ -40,12 +40,14 @@ in
     ghidra
     ida-free
     radare2
-    # TODO: angr-management
-    # TODO: binary-ninja
+    angr-management
+    binaryninja-free
 
     wireshark
+    termshark
     nmap
     tcpdump
+    nftables
     firefox
     geckodriver
     burpsuite

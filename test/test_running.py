@@ -179,6 +179,27 @@ def test_lfs(lfs_dojo, random_user):
         assert False, "LFS didn't create dojo.txt"
 
 @pytest.mark.dependency(depends=["test_join_dojo"])
+def test_import_override(import_override_dojo, random_user):
+    uid, session = random_user
+    assert session.get(f"{DOJO_URL}/dojo/{import_override_dojo}/join/").status_code == 200
+    start_challenge(import_override_dojo, "test", "test", session=session)
+    try:
+        workspace_run("[ -f '/challenge/boom' ]", user=uid)
+        workspace_run("[ ! -f '/challenge/apple' ]", user=uid)
+    except subprocess.CalledProcessError:
+        assert False, "dojo_initialize_files didn't create /challenge/boom"
+
+@pytest.mark.dependency(depends=["test_join_dojo"])
+def test_challenge_transfer(transfer_src_dojo, transfer_dst_dojo, random_user):
+    user_name, session = random_user
+    assert session.get(f"{DOJO_URL}/dojo/{transfer_src_dojo}/join/").status_code == 200
+    assert session.get(f"{DOJO_URL}/dojo/{transfer_dst_dojo}/join/").status_code == 200
+    start_and_solve(user_name, session, transfer_dst_dojo, "dst-module", "dst-challenge")
+    scoreboard = session.get(f"{DOJO_URL}/pwncollege_api/v1/scoreboard/{transfer_src_dojo}/_/0/1").json()
+    us = next(u for u in scoreboard["standings"] if u["name"] == user_name)
+    assert us["solves"] == 1
+
+@pytest.mark.dependency(depends=["test_join_dojo"])
 def test_no_import(no_import_challenge_dojo, admin_session):
     try:
         create_dojo_yml(open(TEST_DOJOS_LOCATION / "forbidden_import.yml").read(), session=admin_session)
@@ -340,6 +361,7 @@ def test_active_module_endpoint(random_user):
         "empty": {}
     }
     apple_description = challenges["apple"].pop("description")
+    challenges["apple"]["description"] = None
     assert response.status_code == 200, f"Expected status code 200, but got {response.status_code}"
     assert response.json()["c_current"] == challenges["banana"], f"Expected challenge 'Banana'\n{challenges['banana']}\n, but got {response.json()['c_current']}"
     assert response.json()["c_next"] == challenges["empty"], f"Expected empty {challenges['empty']} challenge, but got {response.json()['c_next']}"
@@ -349,6 +371,7 @@ def test_active_module_endpoint(random_user):
     start_challenge("example", "hello", "apple", session=session)
     response = session.get(f"{DOJO_URL}/active-module")
     banana_description = challenges["banana"].pop("description")
+    challenges["banana"]["description"] = None
     assert response.status_code == 200, f"Expected status code 200, but got {response.status_code}"
     assert response.json()["c_current"] == challenges["apple"], f"Expected challenge 'Apple'\n{challenges['apple']}\n, but got {response.json()['c_current']}"
     assert response.json()["c_next"] == challenges["banana"], f"Expected challenge 'Banana'\n{challenges['banana']}\n, but got {response.json()['c_next']}"
@@ -453,3 +476,26 @@ def test_workspace_as_user(admin_user, random_user):
         workspace_run("[ ! -e '/home/hacker/test3' ]", user=random_user)
     except subprocess.CalledProcessError as e:
         assert False, f"Expected overlay file to not exist, but got: {(e.stdout, e.stderr)}"
+
+@pytest.mark.dependency(depends=["test_start_challenge"])
+def test_reset_home_directory(random_user):
+    user, session = random_user
+
+    # Create a file in the home directory
+    start_challenge("example", "hello", "apple", session=session)
+    workspace_run("touch /home/hacker/testfile", user=user)
+
+    # Reset the home directory
+    response = session.post(f"{DOJO_URL}/pwncollege_api/v1/workspace/reset_home", json={})
+    assert response.status_code == 200, f"Expected status code 200, but got {response.status_code}"
+    assert response.json()["success"], f"Failed to reset home directory: {response.json()['error']}"
+
+    try:
+        workspace_run("[ -f '/home/hacker/home-backup.tar.gz' ]", user=user)
+    except subprocess.CalledProcessError as e:
+        assert False, f"Expected zip file to exist, but got: {(e.stdout, e.stderr)}"
+
+    try:
+        workspace_run("[ ! -f '/home/hacker/testfile' ]", user=user)
+    except subprocess.CalledProcessError as e:
+        assert False, f"Expected test file to be wiped, but got: {(e.stdout, e.stderr)}"

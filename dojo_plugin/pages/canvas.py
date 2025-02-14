@@ -27,7 +27,10 @@ def canvas_request(endpoint, method="GET", *, dojo, **kwargs):
     url = f"https://{canvas_api_host}/api/v1{endpoint}"
 
     response = requests.request(method, url, headers=headers, **kwargs)
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except Exception as e:
+        raise RuntimeError(f"Canvas request error: {e}")
 
     if "application/json" in response.headers.get("Content-Type", ""):
         return response.json()
@@ -72,7 +75,10 @@ def sync_canvas_user(user_id, challenge_id):
         dojo = dojo_challenge.dojo
         if not (dojo.course and dojo.course.get("canvas_token")):
             continue
-        sync_canvas(dojo, module=dojo_challenge.module, user_id=user_id)
+        try:
+            sync_canvas(dojo, module=dojo_challenge.module, user_id=user_id)
+        except RuntimeError as e:
+            logger.error("Canvas sync error for dojo %s", dojo, exc_info=True)
 
 
 def sync_canvas(dojo, module=None, user_id=None, ignore_pending=False):
@@ -120,8 +126,8 @@ def sync_canvas(dojo, module=None, user_id=None, ignore_pending=False):
             student_submissions = assignment_submissions.setdefault(canvas_assignment["id"], {})
             grade_data = student_submissions.setdefault("grade_data", {})
             student_id = student_ids[user_grades["user_id"]]
-            extra_credit_max = assessment.get("extra_credit_max", 0)
-            if canvas_assignment["points_possible"] == 0 and extra_credit_max > 0:
+            extra_credit_max = assessment.get("extra_credit_max", 100)
+            if canvas_assignment["points_possible"] == 0:
                 logger.info(f"Extra credit post {(assessment_grade['credit'] * extra_credit_max):.2f}")
                 grade_credit = f"{(assessment_grade['credit'] * extra_credit_max):.2f}"
             else:

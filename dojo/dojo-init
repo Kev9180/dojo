@@ -42,6 +42,8 @@ define MAIL_PORT
 define MAIL_USERNAME
 define MAIL_PASSWORD
 define MAIL_ADDRESS
+define DOCKER_USERNAME
+define DOCKER_TOKEN
 define DISCORD_CLIENT_ID
 define DISCORD_CLIENT_SECRET
 define DISCORD_BOT_TOKEN
@@ -78,7 +80,14 @@ if [ "$(findmnt -n -o FSTYPE /data/homes)" != "btrfs" ] && [ "$(findmnt -n -o FS
         truncate -s 256G /data/homes/btrfs.img
         mkfs.btrfs /data/homes/btrfs.img
     fi
-    mount -o loop /data/homes/btrfs.img /data/homes
+    loop_device=$(losetup -f)
+    if [ ! -e "$loop_device" ]; then
+        mknod $loop_device b 7 $(echo $loop_device | tr -cd '0-9')
+        chmod --reference=/dev/loop0 $loop_device
+        chown --reference=/dev/loop0 $loop_device
+    fi
+    losetup "$loop_device" /data/homes/btrfs.img
+    mount "$loop_device" /data/homes
 fi
 btrfs quota enable /data/homes
 
@@ -100,8 +109,15 @@ then
     openssl rand 214 > "${BACKUP_AES_KEY_FILE}"
 fi
 
-sysctl -w kernel.pty.max=1048576
-echo core > /proc/sys/kernel/core_pattern
+# Handle networking issue on Ubuntu 22.04 host (e.g., GitHub Codespaces)
+kernel_version=$(uname -r)
+case "$kernel_version" in
+    6.5.*)
+        echo '[+] Detected Linux kernel version 6.5.*. Switching to legacy iptables.'
+        update-alternatives --set iptables /usr/sbin/iptables-legacy
+        update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+        ;;
+esac
 
 dojo-node refresh
 
